@@ -1,6 +1,8 @@
 # Passport Photos & Photo Collages
 
-Professional Python CLI tools for creating photo layouts and collages ready for printing.
+Python tools for creating photo layouts and collages ready for printing, usable
+three ways: as command-line tools, as an importable library, or as an **MCP
+server** that exposes the same capabilities to AI assistants.
 
 ## Features
 
@@ -14,6 +16,12 @@ Creates a **4"×6" sheet** containing **6 identical copies** of a single photo a
 - White background
 
 **Perfect for:** Passport photos, ID photos, small gift prints
+
+> **Photo size and edging.** Six 2"×2" photos fill a 4"×6" sheet *exactly*, so
+> there is no spare room on the sheet. Any non-zero `--edging` therefore comes
+> out of the photos, making each one slightly smaller than 2"×2" (0.5mm edging
+> gives 1.967"). Use `--edging 0` when the photos must be exactly 2"×2", as US
+> passport photos require. The tool always reports the size it actually used.
 
 ### 📸 Collage Maker (`collage_maker_cli.py`)
 Creates an **8"×11" collage** from multiple images with two layout styles.
@@ -54,10 +62,115 @@ Both layouts support:
    source venv/bin/activate
    ```
 
-3. **Install dependencies:**
+3. **Install the package** (gives you the CLIs, the library, and the MCP server):
    ```bash
-   pip install Pillow
+   pip install -e .
    ```
+
+   For the CLI tools alone, `pip install Pillow` is enough.
+
+---
+
+## MCP Server
+
+The same capabilities are exposed over the [Model Context Protocol](https://modelcontextprotocol.io),
+so AI assistants can build photo sheets and collages directly.
+
+### Tools
+
+| Tool | What it does |
+|------|--------------|
+| `create_photo_grid` | 4"×6" sheet with 6 copies of one photo, with cutting guides |
+| `create_collage` | 8"×11" collage from several images, grid or random layout |
+| `inspect_image` | Dimensions, mode, orientation, and what a square centre-crop would remove |
+
+Images can be passed as file paths **or** as base64 data, so it works both with
+assistants that see your filesystem and with ones where you attach an image.
+
+### Running it
+
+```bash
+image-editing-tools-mcp --base-dir ~/Pictures
+```
+
+`--base-dir` is the directory that relative paths resolve against, and reads and
+writes are confined to it. It defaults to `$IMAGE_TOOLS_BASE_DIR`, or your home
+directory. Set it to the narrowest directory you actually need.
+
+The server speaks **stdio**, which every MCP client supports.
+
+### Client configuration
+
+Replace `/path/to/image_editing_tools` with your checkout, and point `command` at
+the `image-editing-tools-mcp` executable inside your virtualenv (`venv/bin/` on
+macOS and Linux, `venv\Scripts\` on Windows).
+
+**Claude Code** — one command:
+
+```bash
+claude mcp add image-tools -- /path/to/image_editing_tools/venv/bin/image-editing-tools-mcp --base-dir ~/Pictures
+```
+
+**Claude Desktop** — `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "image-tools": {
+      "command": "/path/to/image_editing_tools/venv/bin/image-editing-tools-mcp",
+      "args": ["--base-dir", "/Users/you/Pictures"]
+    }
+  }
+}
+```
+
+**Codex CLI** — `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.image_tools]
+command = "/path/to/image_editing_tools/venv/bin/image-editing-tools-mcp"
+args = ["--base-dir", "/Users/you/Pictures"]
+```
+
+or `codex mcp add image_tools -- /path/to/venv/bin/image-editing-tools-mcp --base-dir ~/Pictures`
+
+**Gemini CLI** — `~/.gemini/settings.json` or `.gemini/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "image-tools": {
+      "command": "/path/to/image_editing_tools/venv/bin/image-editing-tools-mcp",
+      "args": ["--base-dir", "/Users/you/Pictures"]
+    }
+  }
+}
+```
+
+**opencode** — `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "image-tools": {
+      "type": "local",
+      "command": [
+        "/path/to/image_editing_tools/venv/bin/image-editing-tools-mcp",
+        "--base-dir",
+        "/Users/you/Pictures"
+      ],
+      "enabled": true
+    }
+  }
+}
+```
+
+### Limits
+
+Guards exist so a mistaken tool call cannot exhaust memory or clobber files:
+DPI is capped at 600, source images at 80 megapixels, collages at 60 images per
+call, and existing files are never overwritten unless `overwrite` is set.
 
 ---
 
@@ -164,8 +277,9 @@ python3 collage_maker_cli.py *.jpg --output memory_board.jpg --layout random --r
 ## Tips & Best Practices
 
 ### For Photo Grids
-- **Face alignment:** Make sure the subject is centered in the frame for best crop results
-- **Cutting guides:** The black lines mark where to cut for 2"×2" photos
+- **Face alignment:** The image is centre-cropped to a square, trimming whichever dimension is longer — a portrait photo loses its top and bottom, a landscape photo its left and right. Keep the subject centred, and leave headroom in portrait shots.
+- **Exact 2"×2":** Use `--edging 0`. Any other value shrinks the photos to make room for the gutter — see the note under Features.
+- **Cutting guides:** The black lines mark where to cut
 - **Photo quality:** Use high-resolution source images (at least 2000×2000px recommended)
 - **Printing:** Use photo paper for best results; specify 4"×6" size when sending to printer
 
@@ -241,6 +355,20 @@ python3 collage_maker_cli.py *.jpg --layout random --resize --overlap --dpi 300
 
 **Input:** JPEG, PNG, BMP, GIF, TIFF, and most common image formats
 **Output:** JPEG (quality 95, optimized for printing)
+
+---
+
+## Testing
+
+```bash
+python3 tests/test_image_tools.py
+python3 tests/test_mcp_server.py
+```
+
+The first covers layout geometry and the image builders. The second launches the
+MCP server over stdio and drives it as a real client, checking the tool contract,
+the sandbox, and the resource guards. Both are plain Python — no test framework
+required — and exit non-zero on failure.
 
 ---
 

@@ -48,6 +48,24 @@ def resize_to_height(img, target_height):
     return img.resize((new_width, target_height), Image.LANCZOS)
 
 
+def random_position(zone_start, zone_extent, image_extent, canvas_extent):
+    """
+    Pick a random coordinate for an image inside its zone.
+
+    Both bounds are clamped to the canvas, and the upper bound is never allowed
+    below the lower bound -- an image larger than its zone would otherwise
+    produce an empty range.
+    """
+    highest_legal = max(0, canvas_extent - image_extent)
+    low = min(max(0, zone_start), highest_legal)
+    high = min(zone_start + zone_extent - image_extent, highest_legal)
+
+    if high < low:
+        high = low
+
+    return random.randint(low, high)
+
+
 def create_grid_collage(images, canvas_width, canvas_height, resize_images, overlap_enabled):
     """Create a grid-based collage."""
     n_images = len(images)
@@ -125,43 +143,50 @@ def create_random_collage(images, canvas_width, canvas_height, resize_images, ov
             else:
                 processed_img = img.copy()
         
+        # Never let an image exceed the canvas -- otherwise there is no legal
+        # placement for it and the position maths below has an empty range.
+        if processed_img.size[0] > canvas_width or processed_img.size[1] > canvas_height:
+            processed_img = resize_image_to_fit(processed_img, canvas_width, canvas_height)
+
         processed_images.append(processed_img)
-    
+
     # Create white canvas
     canvas = Image.new('RGB', (canvas_width, canvas_height), 'white')
-    
+
     # Divide canvas into zones to ensure distribution
     n_images = len(processed_images)
     zones_per_row = math.ceil(math.sqrt(n_images))
     zone_width = canvas_width // zones_per_row
     zone_height = canvas_height // zones_per_row
-    
-    # Shuffle images for random placement
-    image_zone_pairs = list(enumerate(processed_images))
-    random.shuffle(image_zone_pairs)
-    
+
+    # Shuffle images so that zone assignment is actually randomised: the zone
+    # comes from the position in the shuffled list, not the original index.
+    shuffled_images = list(processed_images)
+    random.shuffle(shuffled_images)
+
     placed_images = []
-    
-    for idx, img in image_zone_pairs:
-        # Calculate zone
-        zone_idx = idx
-        zone_row = zone_idx // zones_per_row
-        zone_col = zone_idx % zones_per_row
-        
-        # Random position within zone
+
+    for slot, img in enumerate(shuffled_images):
+        # Calculate zone from the shuffled slot
+        zone_row = slot // zones_per_row
+        zone_col = slot % zones_per_row
+
+        # Random position within zone, clamped to the canvas. An image wider
+        # than its zone has a range that would otherwise run backwards.
         zone_x = zone_col * zone_width
         zone_y = zone_row * zone_height
-        
-        max_x = min(zone_x + zone_width - img.size[0], canvas_width - img.size[0])
-        max_y = min(zone_y + zone_height - img.size[1], canvas_height - img.size[1])
-        
-        x = random.randint(max(0, zone_x), max(0, max_x))
-        y = random.randint(max(0, zone_y), max(0, max_y))
-        
-        # Random rotation (-15 to +15 degrees)
+
+        x = random_position(zone_x, zone_width, img.size[0], canvas_width)
+        y = random_position(zone_y, zone_height, img.size[1], canvas_height)
+
+        # Random rotation (-15 to +15 degrees). Rotate through RGBA with a
+        # transparent fill so the corners the rotation introduces stay clear
+        # instead of coming out black on the white canvas.
         rotation = random.uniform(-15, 15)
-        rotated_img = img.rotate(rotation, expand=True, resample=Image.BICUBIC)
-        
+        rotated_img = img.convert('RGBA').rotate(
+            rotation, expand=True, resample=Image.BICUBIC, fillcolor=(255, 255, 255, 0)
+        )
+
         # Apply corner overlap if enabled
         if overlap_enabled and placed_images:
             # Randomly try to overlap with a previously placed image
@@ -187,70 +212,99 @@ def create_random_collage(images, canvas_width, canvas_height, resize_images, ov
                 else:  # Bottom-right
                     x = target_x + target_img.size[0] - int(rotated_img.size[0] * overlap_amount)
                     y = target_y + target_img.size[1] - int(rotated_img.size[1] * overlap_amount)
-                
-                # Ensure within bounds
-                x = max(0, min(x, canvas_width - rotated_img.size[0]))
-                y = max(0, min(y, canvas_height - rotated_img.size[1]))
-        
-        # Paste image
-        if rotated_img.mode == 'RGBA':
-            canvas.paste(rotated_img, (x, y), rotated_img)
-        else:
-            canvas.paste(rotated_img, (x, y))
-        
+
+        # Ensure within bounds. Rotation with expand=True grows the bounding
+        # box, so this has to be applied to the rotated size on every path --
+        # not only when an overlap was applied.
+        x = max(0, min(x, canvas_width - rotated_img.size[0]))
+        y = max(0, min(y, canvas_height - rotated_img.size[1]))
+
+        # Paste image, using its own alpha so the rotation corners stay clear
+        canvas.paste(rotated_img, (x, y), rotated_img)
+
         placed_images.append((x, y, rotated_img))
     
     return canvas
 
 
-def create_collage(image_paths, output_path, layout='grid', resize=False, overlap=False, dpi=300):
+def build_collage(sources, layout='grid', resize=False, overlap=False, dpi=300,
+                  canvas_width_inches=8, canvas_height_inches=11):
     """
-    Create a collage from multiple images.
-    
-    Args:
-        image_paths: List of paths to input images
-        output_path: Path for output file
-        layout: 'grid' or 'random'
-        resize: Whether to resize images
-        overlap: Whether to enable overlap
-        dpi: Dots per inch for output
+    Build a collage canvas from paths and/or already-open PIL Images.
+
+    Returns (canvas, info). Pure: no printing, no disk writes, no process exit.
+    Raises ValueError on unreadable input or an unknown layout.
     """
-    # Canvas dimensions
-    canvas_width_inches = 8
-    canvas_height_inches = 11
+    if layout not in ('grid', 'random'):
+        raise ValueError(f"unknown layout {layout!r}; expected 'grid' or 'random'")
+
     canvas_width_px = int(canvas_width_inches * dpi)
     canvas_height_px = int(canvas_height_inches * dpi)
-    
-    # Load images
+
     images = []
-    for path in image_paths:
+    for source in sources:
+        if isinstance(source, Image.Image):
+            images.append(source if source.mode == 'RGB' else source.convert('RGB'))
+            continue
         try:
-            img = Image.open(path)
-            # Convert to RGB if necessary
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-            images.append(img)
+            img = Image.open(source)
+            img.load()
+        except FileNotFoundError:
+            raise ValueError(f"image not found: {source}")
         except Exception as e:
-            print(f"Error loading {path}: {e}")
-            sys.exit(1)
-    
+            raise ValueError(f"could not read image {source}: {e}")
+        images.append(img if img.mode == 'RGB' else img.convert('RGB'))
+
     if not images:
-        print("No valid images to process")
-        sys.exit(1)
-    
-    # Create collage based on layout type
+        raise ValueError("no images supplied")
+
     if layout == 'grid':
         canvas = create_grid_collage(images, canvas_width_px, canvas_height_px, resize, overlap)
-    else:  # random
+        rows, cols = calculate_grid_dimensions(len(images))
+    else:
         canvas = create_random_collage(images, canvas_width_px, canvas_height_px, resize, overlap)
-    
-    # Save with high quality
+        rows = cols = None
+
+    info = {
+        'canvas_px': (canvas_width_px, canvas_height_px),
+        'canvas_inches': (canvas_width_inches, canvas_height_inches),
+        'dpi': dpi,
+        'layout': layout,
+        'resize': resize,
+        'overlap': overlap,
+        'image_count': len(images),
+        'grid_rows': rows,
+        'grid_cols': cols,
+    }
+    return canvas, info
+
+
+def create_collage(image_paths, output_path, layout='grid', resize=False, overlap=False, dpi=300):
+    """
+    Create a collage from multiple images and save it as JPEG.
+
+    Returns the info dict, with 'output_path' added. Raises ValueError on bad
+    input rather than exiting.
+    """
+    canvas, info = build_collage(
+        image_paths, layout=layout, resize=resize, overlap=overlap, dpi=dpi
+    )
+
     canvas.save(output_path, 'JPEG', quality=95, dpi=(dpi, dpi))
-    
-    print(f"Successfully created collage: {output_path}")
-    print(f"Canvas size: {canvas_width_inches}\" x {canvas_height_inches}\" at {dpi} DPI")
-    print(f"Images processed: {len(images)}")
-    print(f"Layout: {layout}, Resize: {resize}, Overlap: {overlap}")
+
+    info['output_path'] = output_path
+    return info
+
+
+def format_collage_report(info):
+    """Render the info dict from create_collage as human-readable lines."""
+    return "\n".join([
+        f"Successfully created collage: {info['output_path']}",
+        f"Canvas size: {info['canvas_inches'][0]}\" x {info['canvas_inches'][1]}\" "
+        f"at {info['dpi']} DPI",
+        f"Images processed: {info['image_count']}",
+        f"Layout: {info['layout']}, Resize: {info['resize']}, Overlap: {info['overlap']}",
+    ])
 
 
 def main():
@@ -306,14 +360,20 @@ Example usage:
     
     args = parser.parse_args()
     
-    create_collage(
-        args.images,
-        args.output,
-        layout=args.layout,
-        resize=args.resize,
-        overlap=args.overlap,
-        dpi=args.dpi
-    )
+    try:
+        info = create_collage(
+            args.images,
+            args.output,
+            layout=args.layout,
+            resize=args.resize,
+            overlap=args.overlap,
+            dpi=args.dpi
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(format_collage_report(info))
 
 
 if __name__ == '__main__':
