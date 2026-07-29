@@ -2,7 +2,7 @@
   "mcpServers": {
     "image-tools": {
       "command": "/Users/harshad/workspaces/image_editing_tools/venv/bin/image-editing-tools-mcp",
-      "args": ["--base-dir", "/Users/harshad/Pictures"]
+      "args": ["--base-dir", "/Users/harshad"]
     }
   }
 }
